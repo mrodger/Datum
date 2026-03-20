@@ -8,7 +8,7 @@
   "test": {
     "vm": "192.168.88.105",
     "branch": "dev",
-    "commit": null,
-    "deployed_at": null
+    "commit": "b2a53a64424df8b590e686fc0f56bdaa4daf3209",
+    "deployed_at": "2026-03-20T22:30:09Z"
   }
 }
