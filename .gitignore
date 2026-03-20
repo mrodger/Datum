@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+agentic-ui/data/
+agentic-ui/uploads/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

@@ -1,0 +1,14 @@
+services:
+  openai-agent:
+    build: .
+    container_name: openai-agent
+    ports:
+      - "8091:8091"
+    volumes:
+      - openai-workspace:/workspace
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  openai-workspace:
