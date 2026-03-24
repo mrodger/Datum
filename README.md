@@ -1,4 +1,4 @@
-# Son of Anton
+# DATUM
 
 A multi-model agentic chat platform that unifies Claude, OpenAI GPT, and custom function-calling agents under a single streaming UI. Built for a personal homelab but designed with production-grade patterns throughout.
 
