@@ -3,6 +3,7 @@
 
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from threading import Lock
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -37,8 +38,21 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_PAT", "")
 TOKEN_PATH = Path(os.getenv("TOKEN_PATH", str(Path.home() / ".oauth-tokens.json")))
 REFRESH_INTERVAL_MINUTES = int(os.getenv("REFRESH_INTERVAL_MINUTES", "30"))
 
+# H-1: shared secret for /oauth/tokens endpoint — set DAEMON_SECRET in .env
+DAEMON_SECRET = os.getenv("DAEMON_SECRET", "")
+
 token_lock = Lock()
 scheduler = BackgroundScheduler()
+
+
+# --- Auth helper ---
+def _require_secret(authorization: str | None):
+    """Verify Bearer token matches DAEMON_SECRET. Raises 401 on failure."""
+    if not DAEMON_SECRET:
+        raise HTTPException(status_code=500, detail="DAEMON_SECRET not configured")
+    expected = f"Bearer {DAEMON_SECRET}"
+    if not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # --- Token I/O ---
@@ -109,7 +123,7 @@ def index():
     google = tokens.get("google", {})
     github = tokens.get("github", {})
     google_valid = bool(google.get("token_json"))
-    google_expiry = google.get("expires_at", "—")
+    google_expiry = google.get("expires_at", "\u2014")
     github_valid = bool(github.get("token"))
 
     return f"""<!DOCTYPE html>
@@ -122,7 +136,7 @@ a.btn{{display:inline-block;padding:6px 14px;background:#333;color:#eee;text-dec
 a.btn:hover{{background:#444}}
 </style></head>
 <body>
-<h1>OAuth Refresh Daemon — port {PORT}</h1>
+<h1>OAuth Refresh Daemon \u2014 port {PORT}</h1>
 
 <h2>Google OAuth</h2>
 <p>Status: {_status_badge(google_valid)}</p>
@@ -163,7 +177,7 @@ def google_callback(code: str = None, state: str = None, error: str = None, erro
 <p>error code: <b>{error}</b></p>
 <p>Redirect URI used: <b>{GOOGLE_REDIRECT_URI}</b></p>
 <p>Make sure this URI is registered in Google Cloud Console under your OAuth client.</p>
-<a href="/" style="color:#aaa">← Back</a></body></html>"""
+<a href="/" style="color:#aaa">\u2190 Back</a></body></html>"""
 
     if not code:
         return HTMLResponse("<html><body>Missing code parameter.</body></html>", status_code=400)
@@ -190,7 +204,7 @@ def google_callback(code: str = None, state: str = None, error: str = None, erro
         return RedirectResponse("/")
     except Exception as e:
         return HTMLResponse(f"""<html><body style="font-family:monospace;background:#111;color:#f66;padding:40px">
-<h2>OAuth callback failed</h2><p>{e}</p><a href="/" style="color:#aaa">← Back</a>
+<h2>OAuth callback failed</h2><p>{e}</p><a href="/" style="color:#aaa">\u2190 Back</a>
 </body></html>""", status_code=500)
 
 
@@ -220,8 +234,10 @@ def oauth_status():
 
 
 @app.get("/oauth/tokens")
-def get_tokens():
-    """Return live tokens for consuming services."""
+def get_tokens(authorization: str | None = Header(default=None)):
+    """Return live tokens for consuming services. Requires Bearer DAEMON_SECRET."""
+    _require_secret(authorization)
+
     tokens = load_tokens()
     result = {}
 
@@ -261,4 +277,4 @@ def force_refresh():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")

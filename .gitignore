@@ -8,3 +8,7 @@ agentic-ui/uploads/
 *.db-shm
 *.db-wal
 .DS_Store
+*client_secret*.json
+*oauth-tokens*.json
+*credentials*.json
+deploy/state.json

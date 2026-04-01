@@ -1,12 +1,12 @@
 {
   "prod": {
-    "vm": "192.168.88.102",
+    "vm": "${PROD_VM}",
     "branch": "main",
     "commit": null,
     "deployed_at": null
   },
   "test": {
-    "vm": "192.168.88.105",
+    "vm": "${TEST_VM}",
     "branch": "dev",
     "commit": null,
     "deployed_at": null
