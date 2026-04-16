@@ -1,6 +1,6 @@
 # DATUM
 
-A multi-model agentic harness that unifies Claude, OpenAI GPT, and custom function-calling agents under a single streaming UI. Built for a personal homelab but designed with production-grade patterns throughout.
+A scratch-built multi-provider agentic harness unifying Claude, OpenAI GPT, and arbitrarily extensible drone workers under a single streaming UI. Built for a personal Proxmox homelab cluster — number 8 wire engineering throughout.
 
 ---
 
@@ -9,6 +9,8 @@ A multi-model agentic harness that unifies Claude, OpenAI GPT, and custom functi
 A single web interface talks to multiple AI backends — you pick a *persona*, and the platform routes your conversation to the right agent, streams the response in real time, and tracks cost and history automatically.
 
 **Personas** are defined as Markdown files, each describing a role and toolset. The platform loads them dynamically — no code changes needed to add a new agent personality.
+
+**Drone workers** extend the provider set arbitrarily. Any containerised agent that speaks the Datum SSE event format can be registered and dispatched — Claude Code, OpenAI, local Ollama models, or custom task runners.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -22,17 +24,25 @@ A single web interface talks to multiple AI backends — you pick a *persona*, a
 │   ┌─ Persona Router ──────────────────────────────┐     │
 │   │  claude  →  run_cc()      subprocess + JSON   │     │
 │   │  openai  →  run_openai_agent()  httpx proxy   │     │
+│   │  drone   →  dispatch()    task queue + poll   │     │
 │   │  *       →  run_openai()  direct SDK stream   │     │
 │   └───────────────────────────────────────────────┘     │
 │   SQLite · Google Drive upload · Voice TTS              │
-└──────────────┬──────────────────────────────────────────┘
-               │ HTTP
-┌──────────────▼──────────────────┐  ┌─────────────────────┐
-│  openai-agent  (Docker · 8091)  │  │  oauth-refresh      │
-│  GPT function-calling loop      │  │  (FastAPI · 8092)   │
-│  Jailed file workspace          │  │  Google + GitHub    │
-│  Tool: read/write/list files    │  │  token daemon       │
-└─────────────────────────────────┘  └─────────────────────┘
+└──────────┬───────────────────┬──────────────────────────┘
+           │ HTTP              │ HTTP
+┌──────────▼──────────────┐  ┌▼────────────────────────────┐
+│  openai-agent           │  │  drone-api  (port 3010)     │
+│  (Docker · port 8091)   │  │  Task queue + worker pool   │
+│  GPT function-calling   │  │  gVisor-sandboxed containers│
+│  Jailed file workspace  │  │  Arbitrary provider support │
+└─────────────────────────┘  └─────────────────────────────┘
+
+Background:
+  oauth-refresh-daemon (FastAPI · port 8092) — Google + GitHub token refresh
+
+Infrastructure:
+  Proxmox cluster · two-VM deploy (VM 102 PROD / VM 105 TEST)
+  Cloudflare tunnel + nginx reverse proxy (chat.geofabnz.com)
 ```
 
 ---
@@ -41,13 +51,15 @@ A single web interface talks to multiple AI backends — you pick a *persona*, a
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-provider streaming** | Claude Code CLI, OpenAI API, custom Docker agents — same SSE format |
+| **Multi-provider streaming** | Claude Code CLI, OpenAI API, drone workers — same SSE format |
+| **Drone dispatch** | Arbitrary agent backends registered at runtime; task queue with polling |
 | **Persona system** | Role definitions in Markdown; hot-loaded on each request |
 | **Conversation persistence** | SQLite with per-message token counts and cost tracking |
 | **File uploads** | Text files inlined into prompt; binaries uploaded to Google Drive |
 | **Tool call visualisation** | Streaming tool invocations rendered as expandable blocks |
 | **PWA-ready** | Installable, offline-capable, works on mobile |
 | **OAuth token daemon** | Background token refresh for Google and GitHub — no manual re-auth |
+| **gVisor sandboxing** | Drone worker containers run under gVisor (Kata runtime) — kernel-level isolation |
 
 ---
 
@@ -65,16 +77,17 @@ A single web interface talks to multiple AI backends — you pick a *persona*, a
 - Service Worker — PWA caching and offline support
 
 **Infrastructure**
-- Docker / Docker Compose — isolated OpenAI agent workspace
-- systemd user services — auto-start on boot for all three services
-- Two-VM deploy pattern — `dev` branch on VM 105 (TEST), `main` on VM 102 (PROD)
+- Docker / Docker Compose — isolated agent workspaces
+- gVisor (runsc) — kernel-level sandboxing for drone worker containers
+- systemd user services — auto-start on boot for all services
+- Proxmox cluster — two-VM deploy: `dev` branch on VM 105 (TEST), `main` on VM 102 (PROD)
 
 ---
 
 ## Project Structure
 
 ```
-son-of-anton/
+datum/
 ├── agentic-ui/          # Main chat server (port 8090)
 │   ├── server.py        # FastAPI routes, streaming, Drive integration
 │   ├── personas.py      # Persona loader
@@ -90,6 +103,9 @@ son-of-anton/
 │   └── Dockerfile
 ├── oauth-refresh-daemon/ # Token manager (port 8092)
 │   └── server.py        # OAuth flows + APScheduler refresh
+├── drone-api/           # Task queue + worker dispatch (port 3010)
+│   ├── server.py        # Queue, status, cancel endpoints
+│   └── workers/         # gVisor-sandboxed agent containers
 └── deploy/
     ├── deploy.sh        # Push to PROD or TEST and update state
     └── state.json       # Tracks deployed commit per environment
@@ -101,7 +117,7 @@ son-of-anton/
 
 ### 1. Unified SSE event format
 
-All three backends emit the same event schema, so the frontend doesn't need to know which provider it's talking to:
+All backends emit the same event schema, so the frontend doesn't need to know which provider it's talking to:
 
 ```python
 # text chunk
@@ -131,7 +147,25 @@ for await (const chunk of readSSE(reader)) {
 }
 ```
 
-### 2. Raw OpenAI function-calling loop
+### 2. Drone dispatch
+
+The drone API accepts tasks and dispatches them to gVisor-sandboxed worker containers. Any agent that implements the SSE event format can be added as a worker:
+
+```bash
+# queue a task
+curl -X POST http://localhost:3010/task \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "...", "persona": "gis-analyst"}'
+# → {"taskId": "abc123", "status": "queued"}
+
+# poll for result
+curl http://localhost:3010/task/abc123
+# → {"taskId": "abc123", "status": "complete", "result": "..."}
+```
+
+Workers run under gVisor (`runsc` runtime) — a compromised container cannot reach the host kernel.
+
+### 3. Raw OpenAI function-calling loop
 
 The OpenAI agent runs a manual tool loop — no framework, just the API:
 
@@ -162,7 +196,7 @@ async def run_agent(messages, model, api_key):
             messages.append({"role": "tool", "content": result, ...})
 ```
 
-### 3. Persona routing
+### 4. Persona routing
 
 Personas are plain Markdown files. The router dispatches to the right provider at message time:
 
@@ -174,13 +208,15 @@ def load_personas() -> list[dict]:
 # server.py — route by persona ID
 if persona == "openai":
     event_iter = run_openai_agent(history, model)
+elif persona in drone_registry:
+    event_iter = dispatch_drone(content, persona)
 elif model in OPENAI_MODELS:
     event_iter = run_openai(content, model, history)
 else:
     event_iter = run_cc(content, session_id, model, persona)
 ```
 
-### 4. Jailed file workspace
+### 5. Jailed file workspace
 
 The OpenAI agent's tools enforce path containment — no escaping to the host:
 
@@ -204,7 +240,7 @@ def write_file(path: str, content: str) -> str:
     return f"written {len(content)} bytes to {path}"
 ```
 
-### 5. OAuth token daemon
+### 6. OAuth token daemon
 
 The daemon handles Google token refresh on a schedule so nothing else needs to think about auth:
 
@@ -230,6 +266,7 @@ GET http://localhost:8092/oauth/tokens
 ### Prerequisites
 - Python 3.12
 - Docker + Docker Compose
+- gVisor (`runsc`) for drone worker sandboxing
 - Claude Code CLI (`claude`)
 - OpenAI API key
 
@@ -258,7 +295,6 @@ curl http://localhost:8091/health
 cd oauth-refresh-daemon
 bash setup.sh          # creates venv, .env from example
 # edit .env: set PORT, GOOGLE_REDIRECT_URI
-# set GITHUB_TOKEN or GITHUB_PAT in .env or ~/.secrets.env
 systemctl --user enable oauth-refresh.service
 systemctl --user start oauth-refresh.service
 
@@ -279,7 +315,7 @@ systemctl --user start  agentic-ui.service openai-agent.service oauth-refresh.se
 
 ## PROD / TEST Deployment
 
-Two VMs track the two git branches:
+Two VMs on a Proxmox cluster track the two git branches:
 
 | Branch | Environment | VM |
 |--------|-------------|-----|
@@ -305,11 +341,13 @@ Current state of each environment is tracked in `deploy/state.json`.
 
 **Add a new persona:** create `~/vault/personas/<name>.md` with a `## Role` section. The platform picks it up on the next request — no restart needed.
 
-**Add a new agent backend:**
-1. Write a FastAPI container (copy `openai-agent/` as template)
-2. Add a proxy function in `agentic-ui/server.py` (copy `run_openai_agent()`)
-3. Add routing logic in the `send_message` handler
+**Add a new drone worker:**
+1. Write a containerised agent that accepts a task payload and emits the Datum SSE event format
+2. Register it in the drone-api worker registry
+3. Add routing logic in `agentic-ui/server.py` (copy `dispatch_drone()` pattern)
 4. Add icon + display name in `personas.py`
+
+Workers run under gVisor by default. To add a Kata Containers variant for stronger isolation, set `runtime: kata` in the drone compose file.
 
 **Add a tool to the OpenAI agent:**
 1. Implement the function in `openai-agent/tools.py`
@@ -325,6 +363,7 @@ Current state of each environment is tracked in `deploy/state.json`.
 - [ ] File output download
 - [ ] SQLite → PostGIS migration (VM 104)
 - [ ] agentic-ui queries oauth-refresh-daemon instead of reading token file directly
+- [ ] Per-agent cost budgets and spend tracking
 
 ---
 
